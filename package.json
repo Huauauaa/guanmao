@@ -1,0 +1,16 @@
+{
+  "name": "guanmao",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@10.33.2",
+  "scripts": {
+    "build": "pnpm --filter @guanmao/shared build && pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server build && pnpm --filter @guanmao/web build && pnpm --filter @guanmao/cli build && pnpm --filter @guanmao/desktop-ui build && pnpm build:desktop:go",
+    "build:desktop:go": "cd apps/desktop && go build ./...",
+    "clean:node_modules": "rm -rf node_modules && pnpm -r exec -- rm -rf node_modules",
+    "dev:server": "pnpm --filter @guanmao/shared build && pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server dev",
+    "dev:web": "pnpm --filter @guanmao/shared build && pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/web dev",
+    "dev:cli": "pnpm --filter @guanmao/shared build && pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/cli dev",
+    "dev:desktop": "cd apps/desktop && wails dev",
+    "typecheck": "pnpm --filter @guanmao/shared build && pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server typecheck && pnpm --filter @guanmao/web typecheck && pnpm --filter @guanmao/cli typecheck && pnpm --filter @guanmao/desktop-ui typecheck"
+  }
+}

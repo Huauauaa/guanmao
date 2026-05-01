@@ -1,0 +1,23 @@
+{
+  "name": "@guanmao/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@guanmao/shared": "workspace:*",
+    "@langchain/core": "^0.3.78",
+    "@langchain/openai": "^0.6.13",
+    "langchain": "^0.3.31",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.3",
+    "typescript": "^5.8.3"
+  }
+}
