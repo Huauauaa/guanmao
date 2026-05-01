@@ -34,35 +34,35 @@ packages/
 Install dependencies:
 
 ```bash
-npm install
+pnpm install
 ```
 
 Run the API server:
 
 ```bash
-npm run dev:server
+pnpm dev:server
 ```
 
 Run the web UI:
 
 ```bash
-npm run dev:web
+pnpm dev:web
 ```
 
 Run the CLI:
 
 ```bash
-npm run dev:cli
+pnpm dev:cli
 ```
 
 Run the desktop app:
 
 ```bash
-npm run dev:desktop
+pnpm dev:desktop
 ```
 
 ## Build
 
 ```bash
-npm run build
+pnpm build
 ```

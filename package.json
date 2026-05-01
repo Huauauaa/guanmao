@@ -2,18 +2,14 @@
   "name": "guanmao",
   "private": true,
   "version": "0.1.0",
-  "workspaces": [
-    "apps/*",
-    "apps/desktop/frontend",
-    "packages/*"
-  ],
+  "packageManager": "pnpm@10.33.2",
   "scripts": {
-    "build": "npm run build -w @guanmao/agent && npm run build -w @guanmao/server && npm run build -w @guanmao/web && npm run build -w @guanmao/cli && npm run build -w @guanmao/desktop-ui && npm run build:desktop:go",
+    "build": "pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server build && pnpm --filter @guanmao/web build && pnpm --filter @guanmao/cli build && pnpm --filter @guanmao/desktop-ui build && pnpm build:desktop:go",
     "build:desktop:go": "cd apps/desktop && go build ./...",
-    "dev:server": "npm run build -w @guanmao/agent && npm run dev -w @guanmao/server",
-    "dev:web": "npm run build -w @guanmao/agent && npm run dev -w @guanmao/web",
-    "dev:cli": "npm run build -w @guanmao/agent && npm run dev -w @guanmao/cli",
+    "dev:server": "pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server dev",
+    "dev:web": "pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/web dev",
+    "dev:cli": "pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/cli dev",
     "dev:desktop": "cd apps/desktop && wails dev",
-    "typecheck": "npm run build -w @guanmao/agent && npm run typecheck -w @guanmao/server && npm run typecheck -w @guanmao/web && npm run typecheck -w @guanmao/cli && npm run typecheck -w @guanmao/desktop-ui"
+    "typecheck": "pnpm --filter @guanmao/agent build && pnpm --filter @guanmao/server typecheck && pnpm --filter @guanmao/web typecheck && pnpm --filter @guanmao/cli typecheck && pnpm --filter @guanmao/desktop-ui typecheck"
   }
 }
