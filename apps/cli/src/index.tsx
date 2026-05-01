@@ -22,8 +22,8 @@ function App() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>();
 
-  useInput((_, key) => {
-    if (key.ctrl && key.c) {
+  useInput((inputValue, key) => {
+    if ((key.ctrl && inputValue === "c") || key.escape) {
       exit();
     }
   });

@@ -14,6 +14,6 @@
     "dev:web": "npm run build -w @guanmao/agent && npm run dev -w @guanmao/web",
     "dev:cli": "npm run build -w @guanmao/agent && npm run dev -w @guanmao/cli",
     "dev:desktop": "cd apps/desktop && wails dev",
-    "typecheck": "npm run typecheck -w @guanmao/agent && npm run typecheck -w @guanmao/server && npm run typecheck -w @guanmao/web && npm run typecheck -w @guanmao/cli && npm run typecheck -w @guanmao/desktop-ui"
+    "typecheck": "npm run build -w @guanmao/agent && npm run typecheck -w @guanmao/server && npm run typecheck -w @guanmao/web && npm run typecheck -w @guanmao/cli && npm run typecheck -w @guanmao/desktop-ui"
   }
 }

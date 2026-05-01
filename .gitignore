@@ -3,6 +3,8 @@ dist
 coverage
 .DS_Store
 *.log
+*.tsbuildinfo
+apps/desktop/desktop
 apps/desktop/bin
 apps/desktop/build/bin
 apps/desktop/frontend/dist
