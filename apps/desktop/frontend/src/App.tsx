@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   App as AntdApp,
   Avatar,
@@ -36,6 +36,8 @@ declare global {
             summary: string;
             actions: string[];
           }>;
+          ChatStream?: (message: string) => Promise<void> | void;
+          GetServerURL?: () => Promise<string> | string;
         };
       };
     };
@@ -51,6 +53,96 @@ const starterQuestions = [
 const createId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
+type StreamTokenPayload = {
+  delta: string;
+};
+
+type StreamErrorPayload = {
+  error: string;
+};
+
+const streamSse = async ({
+  url,
+  body,
+  onToken,
+  onDone,
+  onError,
+  signal,
+}: {
+  url: string;
+  body: unknown;
+  onToken: (payload: StreamTokenPayload) => void;
+  onDone: () => void;
+  onError: (message: string) => void;
+  signal?: AbortSignal;
+}) => {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error("无法建立流式连接");
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8");
+  let buffer = "";
+
+  const flushEvent = (raw: string) => {
+    const lines = raw
+      .split("\n")
+      .map((line) => line.trimEnd())
+      .filter(Boolean);
+    let event = "message";
+    let data = "";
+    for (const line of lines) {
+      if (line.startsWith("event:")) {
+        event = line.slice("event:".length).trim();
+      } else if (line.startsWith("data:")) {
+        const chunk = line.slice("data:".length).trim();
+        data = data ? `${data}\n${chunk}` : chunk;
+      }
+    }
+    if (!data) return;
+
+    try {
+      const payload = JSON.parse(data) as unknown;
+      if (event === "token") {
+        onToken(payload as StreamTokenPayload);
+      } else if (event === "done") {
+        onDone();
+      } else if (event === "error") {
+        const message =
+          typeof (payload as StreamErrorPayload)?.error === "string"
+            ? (payload as StreamErrorPayload).error
+            : "stream error";
+        onError(message);
+      }
+    } catch {
+      // ignore malformed chunk
+    }
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    let idx = buffer.indexOf("\n\n");
+    while (idx !== -1) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      flushEvent(raw);
+      idx = buffer.indexOf("\n\n");
+    }
+  }
+};
+
 function App() {
   const [messages, setMessages] = useState<DesktopMessage[]>([
     {
@@ -62,6 +154,8 @@ function App() {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const streamingAssistantIdRef = useRef<string | null>(null);
+  const streamTimeoutIdRef = useRef<number | null>(null);
 
   const canSend = input.trim().length > 0 && !loading;
 
@@ -83,19 +177,85 @@ function App() {
     setLoading(true);
 
     try {
-      const reply = await window.go?.main?.App?.Chat?.(content);
+      const assistantId = createId();
+      streamingAssistantIdRef.current = assistantId;
       setMessages((current) => [
         ...current,
         {
-          id: reply?.id ?? createId(),
+          id: assistantId,
           role: "assistant",
-          content:
-            reply?.reply ??
-            "当前未检测到 Wails 运行时，请使用 `wails dev` 启动桌面端。",
+          content: "正在生成…",
           createdAt: new Date().toISOString()
         }
       ]);
+
+      const getServerURL = window.go?.main?.App?.GetServerURL;
+      if (!getServerURL) {
+        throw new Error("当前未检测到 Wails 运行时，请使用 `wails dev` 启动桌面端。");
+      }
+
+      const baseUrl = await getServerURL();
+      const controller = new AbortController();
+
+      if (streamTimeoutIdRef.current) {
+        window.clearTimeout(streamTimeoutIdRef.current);
+      }
+      streamTimeoutIdRef.current = window.setTimeout(() => {
+        const targetId = streamingAssistantIdRef.current;
+        if (!targetId) return;
+        streamingAssistantIdRef.current = null;
+        streamTimeoutIdRef.current = null;
+        controller.abort();
+        setLoading(false);
+        setMessages((current) => [
+          ...current,
+          {
+            id: createId(),
+            role: "assistant",
+            content:
+              "桌面端流式响应超时：请确认 server 已启动且可访问（GUANMAO_SERVER_URL）。",
+            createdAt: new Date().toISOString()
+          }
+        ]);
+      }, 15000);
+
+      await streamSse({
+        url: `${baseUrl}/api/chat/stream`,
+        body: { message: content },
+        signal: controller.signal,
+        onToken: ({ delta }) => {
+          const targetId = streamingAssistantIdRef.current;
+          if (!targetId) return;
+          setMessages((current) =>
+            current.map((msg) =>
+              msg.id === targetId
+                ? {
+                    ...msg,
+                    content:
+                      msg.content === "正在生成…" ? delta : `${msg.content}${delta}`,
+                  }
+                : msg,
+            ),
+          );
+        },
+        onDone: () => {
+          streamingAssistantIdRef.current = null;
+          if (streamTimeoutIdRef.current) {
+            window.clearTimeout(streamTimeoutIdRef.current);
+            streamTimeoutIdRef.current = null;
+          }
+          setLoading(false);
+        },
+        onError: (message) => {
+          throw new Error(message);
+        },
+      });
     } catch (error) {
+      streamingAssistantIdRef.current = null;
+      if (streamTimeoutIdRef.current) {
+        window.clearTimeout(streamTimeoutIdRef.current);
+        streamTimeoutIdRef.current = null;
+      }
       setMessages((current) => [
         ...current,
         {
@@ -109,7 +269,7 @@ function App() {
         }
       ]);
     } finally {
-      setLoading(false);
+      // loading is cleared by done/error/timeout
     }
   };
 
@@ -193,7 +353,7 @@ function App() {
                     value={input}
                     onChange={(event) => setInput(event.target.value)}
                     autoSize={{ minRows: 3, maxRows: 6 }}
-                    placeholder="输入你的问题，桌面应用会调用本地 agent 能力"
+                    placeholder="输入你的问题（桌面端将请求本地 server 接口）"
                     onPressEnter={(event) => {
                       if (!event.shiftKey) {
                         event.preventDefault();

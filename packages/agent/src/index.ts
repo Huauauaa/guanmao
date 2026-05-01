@@ -1,27 +1,21 @@
-export type ChatRole = "system" | "user" | "assistant";
+export type {
+  ChatRole,
+  ChatTurn,
+  ConversationInsights,
+  Session,
+} from "@guanmao/shared";
 
-export interface ChatTurn {
-  id: string;
-  role: ChatRole;
-  content: string;
-  createdAt: string;
-}
+import type { ChatTurn, ConversationInsights } from "@guanmao/shared";
 
-export interface ConversationInsights {
-  summary: string;
-  nextSteps: string[];
-}
+import crypto from "node:crypto";
+import { AIMessage, HumanMessage, SystemMessage } from "@langchain/core/messages";
+import { ChatPromptTemplate, MessagesPlaceholder } from "@langchain/core/prompts";
+import { tool } from "@langchain/core/tools";
+import { ChatOpenAI } from "@langchain/openai";
+import { AgentExecutor, createOpenAIToolsAgent } from "langchain/agents";
+import { z } from "zod";
 
-export interface Session {
-  id: string;
-  title: string;
-  createdAt: string;
-  updatedAt: string;
-  messages: ChatTurn[];
-}
-
-const createId = () =>
-  `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+const createId = () => crypto.randomUUID();
 
 const summarizeRecentTurns = (messages: ChatTurn[]) => {
   if (messages.length === 0) {
@@ -50,22 +44,203 @@ export const listSuggestedPrompts = () => [
   "为这个项目写一段产品介绍",
 ];
 
-export const buildConversationReply = (messages: ChatTurn[]): ChatTurn => {
-  const latestUserTurn = [...messages].reverse().find((message) => message.role === "user");
+const hasOpenAIConfig = () => Boolean(process.env.OPENAI_API_KEY);
+
+const toLangChainMessages = (messages: ChatTurn[]) =>
+  messages
+    .map((turn) => {
+      const content = turn.content ?? "";
+      if (turn.role === "system") return new SystemMessage(content);
+      if (turn.role === "assistant") return new AIMessage(content);
+      return new HumanMessage(content);
+    })
+    .filter((message) => (message.content ?? "").toString().trim().length > 0);
+
+const getTools = () => [
+  tool(
+    async () => new Date().toISOString(),
+    {
+      name: "get_time",
+      description: "Get current time in ISO-8601 format.",
+      schema: z.object({}),
+    },
+  ),
+  tool(
+    async ({ text }: { text: string }) => text,
+    {
+      name: "echo",
+      description: "Echo back the input text.",
+      schema: z.object({
+        text: z.string().min(1),
+      }),
+    },
+  ),
+];
+
+const createExecutor = async (options?: { streaming?: boolean }) => {
+  const llm = new ChatOpenAI({
+    model: process.env.OPENAI_MODEL ?? "gpt-4o-mini",
+    temperature: Number(process.env.OPENAI_TEMPERATURE ?? "0.3"),
+    streaming: options?.streaming ?? false,
+    configuration: process.env.OPENAI_BASE_URL
+      ? {
+          baseURL: process.env.OPENAI_BASE_URL,
+        }
+      : undefined,
+  });
+  const tools = getTools();
+  const prompt = ChatPromptTemplate.fromMessages([
+    [
+      "system",
+      [
+        "You are Guanmao, a helpful assistant.",
+        "Be concise, practical, and ask clarifying questions only when necessary.",
+        "You may use tools when it helps produce correct answers.",
+      ].join("\n"),
+    ],
+    new MessagesPlaceholder("chat_history"),
+    ["human", "{input}"],
+    new MessagesPlaceholder("agent_scratchpad"),
+  ]);
+
+  const agent = await createOpenAIToolsAgent({ llm, tools, prompt });
+  return new AgentExecutor({ agent, tools });
+};
+
+const buildFallbackReply = (messages: ChatTurn[]): ChatTurn => {
+  const latestUserTurn = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
   const latestInput = latestUserTurn?.content.trim() || "";
   const historySummary = summarizeRecentTurns(messages);
 
   const replyLines = [
-    "我是 Guanmao 智能助手。",
+    "我是 Guanmao 智能助手（当前未配置 OPENAI_API_KEY，因此使用离线回复）。",
     latestInput ? `你刚刚提到：${latestInput}` : "你可以直接告诉我你的目标或问题。",
     `最近对话上下文：${historySummary}`,
-    "我现在已经同时支持 Server、Web、CLI 和 Desktop 四个入口。",
+    "如需启用 LangChain 模型回复：请设置环境变量 OPENAI_API_KEY。",
   ];
 
   return {
     id: createId(),
     role: "assistant",
     content: replyLines.join("\n"),
+    createdAt: new Date().toISOString(),
+  };
+};
+
+export const streamConversationReply = async function* (
+  messages: ChatTurn[],
+): AsyncGenerator<string> {
+  if (!hasOpenAIConfig()) {
+    yield buildFallbackReply(messages).content;
+    return;
+  }
+
+  const latestUserTurn = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  const latestInput = latestUserTurn?.content.trim() || "";
+
+  if (!latestInput) {
+    yield "我在。直接告诉我你想完成的目标，或把当前上下文贴出来。";
+    return;
+  }
+
+  const executor = await createExecutor({ streaming: true });
+  const history = toLangChainMessages(messages.slice(0, -1));
+
+  const queue: string[] = [];
+  let resolveNext: (() => void) | undefined;
+  let finished = false;
+  let invokeError: unknown;
+
+  const waitForNext = () =>
+    new Promise<void>((resolve) => {
+      resolveNext = resolve;
+    });
+
+  const signalNext = () => {
+    resolveNext?.();
+    resolveNext = undefined;
+  };
+
+  const invokePromise = executor
+    .invoke(
+      {
+        input: latestInput,
+        chat_history: history,
+      },
+      {
+        callbacks: [
+          {
+            handleLLMNewToken(token: string) {
+              if (!token) return;
+              queue.push(token);
+              signalNext();
+            },
+          },
+        ],
+      },
+    )
+    .catch((error) => {
+      invokeError = error;
+    })
+    .finally(() => {
+      finished = true;
+      signalNext();
+    });
+
+  while (!finished || queue.length > 0) {
+    if (queue.length === 0) {
+      await waitForNext();
+      continue;
+    }
+
+    const token = queue.shift();
+    if (token) {
+      yield token;
+    }
+  }
+
+  await invokePromise;
+  if (invokeError) {
+    throw invokeError;
+  }
+};
+
+export const buildConversationReply = async (messages: ChatTurn[]): Promise<ChatTurn> => {
+  if (!hasOpenAIConfig()) {
+    return buildFallbackReply(messages);
+  }
+
+  const latestUserTurn = [...messages]
+    .reverse()
+    .find((message) => message.role === "user");
+  const latestInput = latestUserTurn?.content.trim() || "";
+
+  if (!latestInput) {
+    return {
+      id: createId(),
+      role: "assistant",
+      content: "我在。直接告诉我你想完成的目标，或把当前上下文贴出来。",
+      createdAt: new Date().toISOString(),
+    };
+  }
+
+  const executor = await createExecutor();
+  const history = toLangChainMessages(messages.slice(0, -1));
+  const result = await executor.invoke({
+    input: latestInput,
+    chat_history: history,
+  });
+
+  const output = typeof result.output === "string" ? result.output : String(result.output ?? "");
+
+  return {
+    id: createId(),
+    role: "assistant",
+    content: output.trim() || "（空回复）",
     createdAt: new Date().toISOString(),
   };
 };

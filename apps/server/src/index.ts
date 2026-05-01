@@ -1,10 +1,14 @@
+import dotenv from "dotenv";
 import crypto from "node:crypto";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import cors from "cors";
 import express from "express";
 import {
   buildConversationReply,
   createSessionTitle,
   listSuggestedPrompts,
+  streamConversationReply,
   type ChatTurn,
 } from "@guanmao/agent";
 
@@ -23,6 +27,21 @@ type CreateSessionBody = {
 type SendMessageBody = {
   content?: string;
 };
+
+const here = path.dirname(fileURLToPath(import.meta.url));
+const repoRoot = path.resolve(here, "../../..");
+
+dotenv.config({ path: path.join(repoRoot, ".env"), override: true });
+dotenv.config({ path: path.join(repoRoot, ".env.local"), override: true });
+dotenv.config({ path: path.join(process.cwd(), ".env"), override: true });
+dotenv.config({ path: path.join(process.cwd(), ".env.local"), override: true });
+
+if (!process.env.OPENAI_API_KEY) {
+  console.warn(
+    "OPENAI_API_KEY is not set. Agent will use fallback reply. " +
+      "Check .env/.env.local and your shell environment variables.",
+  );
+}
 
 const app = express();
 const port = Number(process.env.PORT || 3001);
@@ -75,7 +94,7 @@ app.get("/api/sessions", (_req, res) => {
   res.json({ sessions: items });
 });
 
-app.post("/api/sessions", (req, res) => {
+app.post("/api/sessions", async (req, res) => {
   const body = (req.body || {}) as CreateSessionBody;
   const prompt = (body.prompt || "").trim();
   const sessionId = crypto.randomUUID();
@@ -90,7 +109,7 @@ app.post("/api/sessions", (req, res) => {
 
   if (prompt) {
     const userTurn = createTurn("user", prompt);
-    const assistantTurn = buildConversationReply([userTurn]);
+    const assistantTurn = await buildConversationReply([userTurn]);
     session.messages.push(userTurn, assistantTurn);
     session.updatedAt = assistantTurn.createdAt;
   }
@@ -110,7 +129,7 @@ app.get("/api/sessions/:sessionId", (req, res) => {
   res.json({ session });
 });
 
-app.post("/api/sessions/:sessionId/messages", (req, res) => {
+app.post("/api/sessions/:sessionId/messages", async (req, res) => {
   const session = sessions.get(req.params.sessionId);
 
   if (!session) {
@@ -128,7 +147,7 @@ app.post("/api/sessions/:sessionId/messages", (req, res) => {
 
   const userTurn = createTurn("user", content);
   const nextMessages = [...session.messages, userTurn];
-  const assistantTurn = buildConversationReply(nextMessages);
+  const assistantTurn = await buildConversationReply(nextMessages);
 
   session.messages.push(userTurn, assistantTurn);
   session.updatedAt = assistantTurn.createdAt;
@@ -144,7 +163,73 @@ app.post("/api/sessions/:sessionId/messages", (req, res) => {
   });
 });
 
-app.post("/api/chat", (req, res) => {
+app.post("/api/sessions/:sessionId/messages/stream", async (req, res) => {
+  const session = sessions.get(req.params.sessionId);
+
+  if (!session) {
+    res.status(404).json({ error: "Session not found" });
+    return;
+  }
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  const body = (req.body || {}) as SendMessageBody;
+  const content = (body.content || "").trim();
+
+  if (!content) {
+    res.write(
+      `event: error\ndata: ${JSON.stringify({ error: "Message content is required" })}\n\n`,
+    );
+    res.end();
+    return;
+  }
+
+  const userTurn = createTurn("user", content);
+  const nextMessages = [...session.messages, userTurn];
+
+  let full = "";
+  try {
+    for await (const delta of streamConversationReply(nextMessages)) {
+      full += delta;
+      res.write(`event: token\ndata: ${JSON.stringify({ delta })}\n\n`);
+    }
+
+    const assistantTurn: ChatTurn = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: full.trim() || "（空回复）",
+      createdAt: new Date().toISOString(),
+    };
+
+    session.messages.push(userTurn, assistantTurn);
+    session.updatedAt = assistantTurn.createdAt;
+
+    if (session.messages.length === 2 && session.title === "新对话") {
+      session.title = createSessionTitle(content);
+    }
+
+    res.write(
+      `event: done\ndata: ${JSON.stringify({
+        user: userTurn,
+        assistant: assistantTurn,
+        session,
+      })}\n\n`,
+    );
+  } catch (error) {
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: error instanceof Error ? error.message : "stream failed",
+      })}\n\n`,
+    );
+  } finally {
+    res.end();
+  }
+});
+
+app.post("/api/chat", async (req, res) => {
   const body = (req.body || {}) as { messages?: ChatTurn[]; message?: string };
 
   const existingMessages = Array.isArray(body.messages) ? body.messages : [];
@@ -153,11 +238,55 @@ app.post("/api/chat", (req, res) => {
     ? [...existingMessages, createTurn("user", standaloneMessage)]
     : existingMessages;
 
-  const message = buildConversationReply(nextMessages);
+  const message = await buildConversationReply(nextMessages);
   res.status(201).json({
     message,
     messages: [...nextMessages, message],
   });
+});
+
+app.post("/api/chat/stream", async (req, res) => {
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  const body = (req.body || {}) as { messages?: ChatTurn[]; message?: string };
+  const existingMessages = Array.isArray(body.messages) ? body.messages : [];
+  const standaloneMessage = (body.message || "").trim();
+  const nextMessages = standaloneMessage
+    ? [...existingMessages, createTurn("user", standaloneMessage)]
+    : existingMessages;
+
+  let full = "";
+  try {
+    for await (const delta of streamConversationReply(nextMessages)) {
+      full += delta;
+      res.write(`event: token\ndata: ${JSON.stringify({ delta })}\n\n`);
+    }
+
+    const assistant: ChatTurn = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      content: full.trim() || "（空回复）",
+      createdAt: new Date().toISOString(),
+    };
+
+    res.write(
+      `event: done\ndata: ${JSON.stringify({
+        message: assistant,
+        messages: [...nextMessages, assistant],
+      })}\n\n`,
+    );
+  } catch (error) {
+    res.write(
+      `event: error\ndata: ${JSON.stringify({
+        error: error instanceof Error ? error.message : "stream failed",
+      })}\n\n`,
+    );
+  } finally {
+    res.end();
+  }
 });
 
 app.listen(port, () => {
