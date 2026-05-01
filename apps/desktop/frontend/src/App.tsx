@@ -13,6 +13,8 @@ import {
   Typography
 } from "antd";
 import { RobotOutlined, UserOutlined } from "@ant-design/icons";
+import { streamSseJson } from "@guanmao/shared";
+import type { ChatTurn } from "@guanmao/shared";
 
 const { Header, Content } = Layout;
 const { Title, Paragraph, Text } = Typography;
@@ -53,95 +55,8 @@ const starterQuestions = [
 const createId = () =>
   `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
-type StreamTokenPayload = {
-  delta: string;
-};
-
-type StreamErrorPayload = {
-  error: string;
-};
-
-const streamSse = async ({
-  url,
-  body,
-  onToken,
-  onDone,
-  onError,
-  signal,
-}: {
-  url: string;
-  body: unknown;
-  onToken: (payload: StreamTokenPayload) => void;
-  onDone: () => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}) => {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!response.ok || !response.body) {
-    throw new Error("无法建立流式连接");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const flushEvent = (raw: string) => {
-    const lines = raw
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean);
-    let event = "message";
-    let data = "";
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        event = line.slice("event:".length).trim();
-      } else if (line.startsWith("data:")) {
-        const chunk = line.slice("data:".length).trim();
-        data = data ? `${data}\n${chunk}` : chunk;
-      }
-    }
-    if (!data) return;
-
-    try {
-      const payload = JSON.parse(data) as unknown;
-      if (event === "token") {
-        onToken(payload as StreamTokenPayload);
-      } else if (event === "done") {
-        onDone();
-      } else if (event === "error") {
-        const message =
-          typeof (payload as StreamErrorPayload)?.error === "string"
-            ? (payload as StreamErrorPayload).error
-            : "stream error";
-        onError(message);
-      }
-    } catch {
-      // ignore malformed chunk
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let idx = buffer.indexOf("\n\n");
-    while (idx !== -1) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      flushEvent(raw);
-      idx = buffer.indexOf("\n\n");
-    }
-  }
-};
+type StreamTokenPayload = { delta: string };
+type StreamDonePayload = { message: ChatTurn; messages: ChatTurn[] };
 
 function App() {
   const [messages, setMessages] = useState<DesktopMessage[]>([
@@ -219,35 +134,37 @@ function App() {
         ]);
       }, 15000);
 
-      await streamSse({
+      await streamSseJson<StreamTokenPayload, StreamDonePayload>({
         url: `${baseUrl}/api/chat/stream`,
         body: { message: content },
         signal: controller.signal,
-        onToken: ({ delta }) => {
-          const targetId = streamingAssistantIdRef.current;
-          if (!targetId) return;
-          setMessages((current) =>
-            current.map((msg) =>
-              msg.id === targetId
-                ? {
-                    ...msg,
-                    content:
-                      msg.content === "正在生成…" ? delta : `${msg.content}${delta}`,
-                  }
-                : msg,
-            ),
-          );
-        },
-        onDone: () => {
-          streamingAssistantIdRef.current = null;
-          if (streamTimeoutIdRef.current) {
-            window.clearTimeout(streamTimeoutIdRef.current);
-            streamTimeoutIdRef.current = null;
-          }
-          setLoading(false);
-        },
-        onError: (message) => {
-          throw new Error(message);
+        handlers: {
+          onToken: ({ delta }: StreamTokenPayload) => {
+            const targetId = streamingAssistantIdRef.current;
+            if (!targetId) return;
+            setMessages((current) =>
+              current.map((msg) =>
+                msg.id === targetId
+                  ? {
+                      ...msg,
+                      content:
+                        msg.content === "正在生成…" ? delta : `${msg.content}${delta}`,
+                    }
+                  : msg,
+              ),
+            );
+          },
+          onDone: (_payload: StreamDonePayload) => {
+            streamingAssistantIdRef.current = null;
+            if (streamTimeoutIdRef.current) {
+              window.clearTimeout(streamTimeoutIdRef.current);
+              streamTimeoutIdRef.current = null;
+            }
+            setLoading(false);
+          },
+          onError: (message: string) => {
+            throw new Error(message);
+          },
         },
       });
     } catch (error) {

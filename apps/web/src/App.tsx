@@ -14,6 +14,7 @@ import {
   Typography,
 } from "antd";
 import { RobotOutlined, UserOutlined } from "@ant-design/icons";
+import { streamSseJson } from "@guanmao/shared";
 import type { ChatTurn, Session } from "@guanmao/shared";
 
 const { Header, Content, Sider } = Layout;
@@ -40,97 +41,8 @@ type PromptsResponse = {
   prompts: string[];
 };
 
-type StreamTokenPayload = {
-  delta: string;
-};
-
-type StreamDonePayload = {
-  session: Session;
-  user: ChatTurn;
-  assistant: ChatTurn;
-};
-
-const streamSse = async ({
-  url,
-  body,
-  onToken,
-  onDone,
-  onError,
-  signal,
-}: {
-  url: string;
-  body: unknown;
-  onToken: (payload: StreamTokenPayload) => void;
-  onDone: (payload: StreamDonePayload) => void;
-  onError: (message: string) => void;
-  signal?: AbortSignal;
-}) => {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-    signal,
-  });
-
-  if (!response.ok || !response.body) {
-    throw new Error("无法建立流式连接");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const flushEvent = (raw: string) => {
-    const lines = raw
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean);
-    let event = "message";
-    let data = "";
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        event = line.slice("event:".length).trim();
-      } else if (line.startsWith("data:")) {
-        const chunk = line.slice("data:".length).trim();
-        data = data ? `${data}\n${chunk}` : chunk;
-      }
-    }
-    if (!data) return;
-    try {
-      const payload = JSON.parse(data) as unknown;
-      if (event === "token") {
-        onToken(payload as StreamTokenPayload);
-      } else if (event === "done") {
-        onDone(payload as StreamDonePayload);
-      } else if (event === "error") {
-        const message =
-          typeof (payload as any)?.error === "string"
-            ? (payload as any).error
-            : "stream error";
-        onError(message);
-      }
-    } catch {
-      // ignore malformed chunks
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let idx = buffer.indexOf("\n\n");
-    while (idx !== -1) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      flushEvent(raw);
-      idx = buffer.indexOf("\n\n");
-    }
-  }
-};
+type StreamTokenPayload = { delta: string };
+type StreamDonePayload = { session: Session; user: ChatTurn; assistant: ChatTurn };
 
 function App() {
   const [sessions, setSessions] = useState<SessionsResponse["sessions"]>([]);
@@ -279,11 +191,12 @@ function App() {
       const controller = new AbortController();
       let doneSession: Session | null = null;
 
-      await streamSse({
+      await streamSseJson<StreamTokenPayload, StreamDonePayload>({
         url: `${apiBaseUrl}/api/sessions/${activeSession.id}/messages/stream`,
         body: { content },
         signal: controller.signal,
-        onToken: ({ delta }) => {
+        handlers: {
+          onToken: ({ delta }) => {
           setActiveSession((current) => {
             if (!current) return current;
             const nextMessages = current.messages.map((msg) =>
@@ -294,12 +207,13 @@ function App() {
             return { ...current, messages: nextMessages };
           });
         },
-        onDone: (payload) => {
+          onDone: (payload) => {
           doneSession = payload.session;
           setActiveSession(payload.session);
         },
-        onError: (message) => {
+          onError: (message) => {
           throw new Error(message);
+        },
         },
       });
 

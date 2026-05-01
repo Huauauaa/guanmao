@@ -9,8 +9,8 @@ import {
   createSessionTitle,
   listSuggestedPrompts,
   streamConversationReply,
-  type ChatTurn,
 } from "@guanmao/agent";
+import type { ChatTurn } from "@guanmao/shared";
 
 type Session = {
   id: string;
@@ -175,6 +175,16 @@ app.post("/api/sessions/:sessionId/messages/stream", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  res.write(": connected\n\n");
+
+  let aborted = false;
+  req.on("aborted", () => {
+    aborted = true;
+  });
+  res.on("close", () => {
+    aborted = true;
+  });
 
   const body = (req.body || {}) as SendMessageBody;
   const content = (body.content || "").trim();
@@ -193,8 +203,15 @@ app.post("/api/sessions/:sessionId/messages/stream", async (req, res) => {
   let full = "";
   try {
     for await (const delta of streamConversationReply(nextMessages)) {
+      if (aborted) {
+        break;
+      }
       full += delta;
       res.write(`event: token\ndata: ${JSON.stringify({ delta })}\n\n`);
+    }
+
+    if (aborted) {
+      return;
     }
 
     const assistantTurn: ChatTurn = {
@@ -250,6 +267,16 @@ app.post("/api/chat/stream", async (req, res) => {
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.flushHeaders?.();
+  res.write(": connected\n\n");
+
+  let aborted = false;
+  req.on("aborted", () => {
+    aborted = true;
+  });
+  res.on("close", () => {
+    aborted = true;
+  });
 
   const body = (req.body || {}) as { messages?: ChatTurn[]; message?: string };
   const existingMessages = Array.isArray(body.messages) ? body.messages : [];
@@ -261,8 +288,15 @@ app.post("/api/chat/stream", async (req, res) => {
   let full = "";
   try {
     for await (const delta of streamConversationReply(nextMessages)) {
+      if (aborted) {
+        break;
+      }
       full += delta;
       res.write(`event: token\ndata: ${JSON.stringify({ delta })}\n\n`);
+    }
+
+    if (aborted) {
+      return;
     }
 
     const assistant: ChatTurn = {

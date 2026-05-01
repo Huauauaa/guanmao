@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Newline, render, Text, useApp, useInput } from "ink";
 import TextInput from "ink-text-input";
+import { streamSseJson } from "@guanmao/shared";
 import type { ChatTurn, Session } from "@guanmao/shared";
 
 type CreateSessionResponse = {
@@ -15,90 +16,8 @@ type SendMessageResponse = {
 
 const endpoint = process.env.GUANMAO_SERVER_URL ?? "http://localhost:3001";
 
-type StreamTokenPayload = {
-  delta: string;
-};
-
+type StreamTokenPayload = { delta: string };
 type StreamDonePayload = SendMessageResponse;
-
-const streamSse = async ({
-  url,
-  body,
-  onToken,
-  onDone,
-  onError,
-}: {
-  url: string;
-  body: unknown;
-  onToken: (payload: StreamTokenPayload) => void;
-  onDone: (payload: StreamDonePayload) => void;
-  onError: (message: string) => void;
-}) => {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Accept: "text/event-stream",
-    },
-    body: JSON.stringify(body),
-  });
-
-  if (!response.ok || !response.body) {
-    throw new Error("无法建立流式连接");
-  }
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-
-  const flushEvent = (raw: string) => {
-    const lines = raw
-      .split("\n")
-      .map((line) => line.trimEnd())
-      .filter(Boolean);
-    let event = "message";
-    let data = "";
-    for (const line of lines) {
-      if (line.startsWith("event:")) {
-        event = line.slice("event:".length).trim();
-      } else if (line.startsWith("data:")) {
-        const chunk = line.slice("data:".length).trim();
-        data = data ? `${data}\n${chunk}` : chunk;
-      }
-    }
-    if (!data) return;
-    try {
-      const payload = JSON.parse(data) as unknown;
-      if (event === "token") {
-        onToken(payload as StreamTokenPayload);
-      } else if (event === "done") {
-        onDone(payload as StreamDonePayload);
-      } else if (event === "error") {
-        const message =
-          typeof (payload as any)?.error === "string"
-            ? (payload as any).error
-            : "stream error";
-        onError(message);
-      }
-    } catch {
-      // ignore malformed chunks
-    }
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    let idx = buffer.indexOf("\n\n");
-    while (idx !== -1) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
-      flushEvent(raw);
-      idx = buffer.indexOf("\n\n");
-    }
-  }
-};
 
 function App() {
   const { exit } = useApp();
@@ -174,27 +93,29 @@ function App() {
           : current,
       );
 
-      await streamSse({
+      await streamSseJson<StreamTokenPayload, StreamDonePayload>({
         url: `${endpoint}/api/sessions/${session.id}/messages/stream`,
         body: { content },
-        onToken: ({ delta }) => {
-          setSession((current) => {
-            if (!current) return current;
-            return {
-              ...current,
-              messages: current.messages.map((msg) =>
-                msg.id === optimisticAssistantId
-                  ? { ...msg, content: `${msg.content}${delta}` }
-                  : msg,
-              ),
-            };
-          });
-        },
-        onDone: (payload) => {
-          setSession(payload.session);
-        },
-        onError: (message) => {
-          throw new Error(message);
+        handlers: {
+          onToken: ({ delta }: StreamTokenPayload) => {
+            setSession((current) => {
+              if (!current) return current;
+              return {
+                ...current,
+                messages: current.messages.map((msg) =>
+                  msg.id === optimisticAssistantId
+                    ? { ...msg, content: `${msg.content}${delta}` }
+                    : msg,
+                ),
+              };
+            });
+          },
+          onDone: (payload: StreamDonePayload) => {
+            setSession(payload.session);
+          },
+          onError: (message: string) => {
+            throw new Error(message);
+          },
         },
       });
     } catch (submitError) {
